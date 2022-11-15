@@ -20,6 +20,7 @@ from impacket.dcerpc.v5.dcom.wmi import WBEM_FLAG_FORWARD_ONLY
 from impacket.dcerpc.v5.samr import SID_NAME_USE
 from impacket.dcerpc.v5.dtypes import MAXIMUM_ALLOWED
 from impacket.krb5.kerberosv5 import SessionKeyDecryptionError
+from impacket.krb5.types import KerberosException
 from cme.connection import *
 from cme.logger import CMEAdapter
 from cme.servers.smb import CMESMBServer
@@ -233,7 +234,7 @@ class smb(connection):
             transport = DCERPCTransportFactory(stringBinding)
             transport.set_connect_timeout(5)
             dce = transport.get_dce_rpc()
-            if self.args.kerberos:
+            if self.kerberos:
                 dce.set_auth_type(RPC_C_AUTHN_GSS_NEGOTIATE)
             dce.connect()
             try:
@@ -253,18 +254,18 @@ class smb(connection):
 
     def enum_host_info(self):
         self.local_ip = self.conn.getSMBServer().get_socket().getsockname()[0]
-
+        no_ntlm = False
         try:
             self.conn.login('' , '')
-            self.domain    = self.conn.getServerDNSDomainName()
-            self.hostname  = self.conn.getServerName()
-            self.server_os = self.conn.getServerOS()
         except Exception as e:
             if "STATUS_NOT_SUPPORTED" in str(e):
                 # no ntlm supported
-                self.domain = self.args.domain
-                self.hostname = self.host
+                no_ntlm = True
             pass
+
+        self.domain    = self.conn.getServerDNSDomainName() if not no_ntlm else self.args.domain
+        self.hostname  = self.conn.getServerName() if not no_ntlm else self.host
+        self.server_os = self.conn.getServerOS()
 
         try:
             self.signing   = self.conn.isSigningRequired() if self.smbv1 else self.conn._SMBConnection._Connection['RequireSigning']
@@ -344,7 +345,8 @@ class smb(connection):
     def kerberos_login(self, domain, username, password = '', ntlm_hash = '', aesKey = '', kdcHost = '', useCache = False):
         logging.getLogger("impacket").disabled = True
         #Re-connect since we logged off
-        self.create_conn_obj()
+        fqdn_host = self.hostname + "." + self.domain
+        self.create_conn_obj(fqdn_host)
         lmhash = ''
         nthash = ''
         if not all('' == s for s in [self.nthash, password, aesKey]):
@@ -393,9 +395,18 @@ class smb(connection):
                                                     ""),
                                                     color='yellow')
             return False
-        except FileNotFoundError as e:
+        except (FileNotFoundError, KerberosException) as e:
             self.logger.error('CCache Error: {}'.format(e))
             return False
+        except OSError as e:
+            self.logger.error(u'{}\\{}{} {} {}'.format(domain,
+                                                        self.username,
+                                                        # Show what was used between cleartext, nthash, aesKey and ccache
+                                                        " from ccache" if useCache
+                                                        else ":%s" % (next(sub for sub in [nthash,password,aesKey] if (sub != '' and sub != None) or sub != None) if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
+                                                        str(e),
+                                                        '',
+                                                        color='red'))
         except (SessionError, Exception) as e:
             error, desc = e.getErrorString()
             self.logger.error(u'{}\\{}{} {} {}'.format(domain,
@@ -409,7 +420,7 @@ class smb(connection):
             if error not in smb_error_status:
                 self.inc_failed_login(username)
                 return False
-            return False
+            return False 
 
     def plaintext_login(self, domain, username, password):
         #Re-connect since we logged off
@@ -522,38 +533,38 @@ class smb(connection):
             self.logger.error('Connection Error: {}'.format(e))
             return False
 
-    def create_smbv1_conn(self):
+    def create_smbv1_conn(self, kdc=''):
         try:
-            self.conn = SMBConnection(self.host, self.host, None, self.args.port, preferredDialect=SMB_DIALECT, timeout=self.args.smb_timeout)
+            self.conn = SMBConnection(self.host if not kdc else kdc, self.host if not kdc else kdc, None, self.args.port, preferredDialect=SMB_DIALECT, timeout=self.args.smb_timeout)
             self.smbv1 = True
         except socket.error as e:
             if str(e).find('Connection reset by peer') != -1:
-                logging.debug('SMBv1 might be disabled on {}'.format(self.host))
+                logging.debug('SMBv1 might be disabled on {}'.format(self.host if not kdc else kdc))
             return False
         except (Exception, NetBIOSTimeout) as e:
-            logging.debug('Error creating SMBv1 connection to {}: {}'.format(self.host, e))
+            logging.debug('Error creating SMBv1 connection to {}: {}'.format(self.host if not kdc else kdc, e))
             return False
 
         return True
 
-    def create_smbv3_conn(self):
+    def create_smbv3_conn(self, kdc=''):
         try:
-            self.conn = SMBConnection(self.host, self.host, None, self.args.port, timeout=self.args.smb_timeout)
+            self.conn = SMBConnection(self.host if not kdc else kdc, self.host if not kdc else kdc, None, self.args.port, timeout=self.args.smb_timeout)
             self.smbv1 = False
         except socket.error as e:
             if str(e).find('Too many open files') != -1:
-                self.logger.error('SMBv3 connection error on {}: {}'.format(self.host, e))
+                self.logger.error('SMBv3 connection error on {}: {}'.format(self.host if not kdc else kdc, e))
             return False
         except (Exception, NetBIOSTimeout) as e:
-            logging.debug('Error creating SMBv3 connection to {}: {}'.format(self.host, e))
+            logging.debug('Error creating SMBv3 connection to {}: {}'.format(self.host if not kdc else kdc, e))
             return False
 
         return True
 
-    def create_conn_obj(self):
-        if self.create_smbv1_conn():
+    def create_conn_obj(self, kdc=''):
+        if self.create_smbv1_conn(kdc):
             return True
-        elif self.create_smbv3_conn():
+        elif self.create_smbv3_conn(kdc):
             return True
 
         return False
@@ -931,7 +942,6 @@ class smb(connection):
     def pass_pol(self):
         return PassPolDump(self).dump()
 
-    @requires_admin
     def wmi(self, wmi_query=None, namespace=None):
         records = []
         if not namespace:

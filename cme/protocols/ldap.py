@@ -17,7 +17,7 @@ from impacket.smbconnection import SMBConnection, SessionError
 from impacket.smb import SMB_DIALECT
 from impacket.dcerpc.v5.samr import UF_ACCOUNTDISABLE, UF_DONT_REQUIRE_PREAUTH, UF_TRUSTED_FOR_DELEGATION, UF_TRUSTED_TO_AUTHENTICATE_FOR_DELEGATION
 from impacket.krb5.kerberosv5 import sendReceive, KerberosError, getKerberosTGT, getKerberosTGS, SessionKeyDecryptionError
-from impacket.krb5.types import KerberosTime, Principal
+from impacket.krb5.types import KerberosTime, Principal, KerberosException
 from impacket.ldap import ldap as ldap_impacket
 from impacket.krb5 import constants
 from impacket.ldap import ldapasn1 as ldapasn1_impacket
@@ -140,7 +140,7 @@ class ldap(connection):
                     logging.debug("Exception:", exc_info=True)
                     logging.debug('Skipping item, cannot process due to error %s' % str(e))
         except OSError as e:
-            self.logger.error(u'Error connecting to the host.')
+            return [None, None, None]
 
         return [target, targetDomain, baseDN]
 
@@ -197,7 +197,6 @@ class ldap(connection):
             except Exception as e:
                 if "STATUS_NOT_SUPPORTED" in str(e):
                     self.no_ntlm = True
-
                 pass
             if not self.no_ntlm:
                 self.domain    = self.conn.getServerDNSDomainName()
@@ -325,12 +324,12 @@ class ldap(connection):
                                                 str(error)),
                                                 color='magenta' if error in ldap_error_status else 'red')
             return False
-        except KeyError as e:
+        except (KeyError, KerberosException) as e:
             self.logger.error(u'{}\\{}{} {}'.format(self.domain,
                                                 self.username,
                                                 " from ccache" if useCache
                                                 else ":%s" % (kerb_pass if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
-                                                ''),
+                                                str(e)),
                                                 color='red')
             return False
         except ldap_impacket.LDAPSessionError as e:
@@ -476,7 +475,7 @@ class ldap(connection):
             self.logger.error(u'{}\\{}:{} {}'.format(self.domain, 
                                                  self.username, 
                                                  self.password if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8,
-                                                 "Error connecting to the domain, please add option --kdcHost with the FQDN of the domain controller or add the IP/HOST to your /etc/host file"))
+                                                 "Error connecting to the domain, are you sure LDAP service is running on the target ?"))
             return False
 
 
@@ -567,7 +566,7 @@ class ldap(connection):
             self.logger.error(u'{}\\{}:{} {}'.format(self.domain, 
                                                  self.username, 
                                                  nthash if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8,
-                                                 "Error connecting to the domain, please add option --kdcHost with the FQDN of the domain controller or add the IP/HOST to your /etc/host file"))
+                                                 "Error connecting to the domain, are you sure LDAP service is running on the target ?"))
             return False
 
     def create_smbv1_conn(self):
