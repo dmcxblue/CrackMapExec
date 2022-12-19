@@ -298,8 +298,16 @@ class smb(connection):
             self.domain = self.hostname
 
     def laps_search(self, username, password, ntlm_hash, domain):
+        self.logger.extra['protocol'] = "LDAP"
+        self.logger.extra['port'] = "389"
         ldapco = LDAPConnect(self.domain, "389", self.domain)
-        connection = ldapco.plaintext_login(domain, username[0] if username else '', password[0] if password else '', ntlm_hash[0] if ntlm_hash else '' )
+        if self.kerberos:
+            if self.kdcHost == None:
+                self.logger.error('Provide --kdcHost parameter')
+                return False
+            connection = ldapco.kerberos_login(domain, username[0] if username else '', password[0] if password else '', ntlm_hash[0] if ntlm_hash else '', self.kdcHost, self.aesKey)
+        else:
+            connection = ldapco.plaintext_login(domain, username[0] if username else '', password[0] if password else '', ntlm_hash[0] if ntlm_hash else '' )
         if connection == False:
             logging.debug('LAPS connection failed with account {}'.format(username))
             return False
@@ -323,12 +331,14 @@ class smb(connection):
         self.username = self.args.laps
         self.password = msMCSAdmPwd
         if msMCSAdmPwd == '':
-            logging.debug('msMCSAdmPwd is empty, account cannot read LAPS property for {}'.format(self.hostname))
+            self.logger.error('msMCSAdmPwd is empty or account cannot read LAPS property for {}'.format(self.hostname))
             return False
         if ntlm_hash:
             hash_ntlm = hashlib.new('md4', msMCSAdmPwd.encode('utf-16le')).digest()
             self.hash = binascii.hexlify(hash_ntlm).decode()
         self.domain = self.hostname
+        self.logger.extra['protocol'] = "SMB"
+        self.logger.extra['port'] = "445"
         return True
 
     def print_host_info(self):
@@ -349,10 +359,6 @@ class smb(connection):
         self.create_conn_obj(fqdn_host)
         lmhash = ''
         nthash = ''
-        if not all('' == s for s in [self.nthash, password, aesKey]):
-            kerb_pass = next(s for s in [self.nthash, password, aesKey] if s)
-        else:
-            kerb_pass = ''
 
         try:
             if not self.args.laps:
@@ -367,6 +373,12 @@ class smb(connection):
                 self.hash = ntlm_hash
             if lmhash: self.lmhash = lmhash
             if nthash: self.nthash = nthash
+
+            if not all('' == s for s in [self.nthash, password, aesKey]):
+                kerb_pass = next(s for s in [self.nthash, password, aesKey] if s)
+            else:
+                kerb_pass = ''
+
             self.conn.kerberosLogin(username, password, domain, lmhash, nthash, aesKey, kdcHost, useCache=useCache)
             self.check_if_admin()
             
@@ -408,7 +420,7 @@ class smb(connection):
                                                         self.username,
                                                         # Show what was used between cleartext, nthash, aesKey and ccache
                                                         " from ccache" if useCache
-                                                        else ":%s" % (next(sub for sub in [nthash,password,aesKey] if (sub != '' and sub != None) or sub != None) if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
+                                                        else ":%s" % (kerb_pass if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
                                                         str(e),
                                                         '',
                                                         color='red'))
@@ -418,7 +430,7 @@ class smb(connection):
                                                         self.username,
                                                         # Show what was used between cleartext, nthash, aesKey and ccache
                                                         " from ccache" if useCache
-                                                        else ":%s" % (next(sub for sub in [nthash,password,aesKey] if (sub != '' and sub != None) or sub != None) if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
+                                                        else ":%s" % (kerb_pass if not self.config.get('CME', 'audit_mode') else self.config.get('CME', 'audit_mode')*8),
                                                         error,
                                                         '({})'.format(desc) if self.args.verbose else ''),
                                                         color='magenta' if error in smb_error_status else 'red')
@@ -1186,9 +1198,10 @@ class smb(connection):
 
         def add_ntds_hash(ntds_hash, host_id):
             add_ntds_hash.ntds_hashes += 1
-            if "Enabled" in ntds_hash and self.args.enabled:
-                ntds_hash = ntds_hash.split(" ")[0]
-                self.logger.highlight(ntds_hash)
+            if self.args.enabled:
+                if "Enabled" in ntds_hash:
+                    ntds_hash = ntds_hash.split(" ")[0]
+                    self.logger.highlight(ntds_hash)
             else:
                 ntds_hash = ntds_hash.split(" ")[0]
                 self.logger.highlight(ntds_hash)
@@ -1239,6 +1252,8 @@ class smb(connection):
             self.logger.success('Dumping the NTDS, this could take a while so go grab a redbull...')
             NTDS.dump()
             self.logger.success('Dumped {} NTDS hashes to {} of which {} were added to the database'.format(highlight(add_ntds_hash.ntds_hashes), self.output_filename + '.ntds', highlight(add_ntds_hash.added_to_db)))
+            self.logger.info("To extract only enabled accounts from the output file, run the following command: ")
+            self.logger.info("cat {} | grep -iv disabled | cut -d ':' -f1".format(self.output_filename + '.ntds'))
         except Exception as e:
             #if str(e).find('ERROR_DS_DRA_BAD_DN') >= 0:
                 # We don't store the resume file if this error happened, since this error is related to lack
